@@ -1,0 +1,446 @@
+// BMIS database schema - Phase 1 (authentication, RBAC, sessions, audit)
+// and Phase 2 (resident management).
+//
+// Design notes:
+// - MariaDB/MySQL compatible; no JSON columns are used so the schema works on
+//   both engines. Structured audit metadata and change payloads are stored as
+//   JSON strings in TEXT.
+// - Timestamps are stored in UTC by Prisma. Presentation in Asia/Manila is a
+//   frontend concern.
+// - Household, purok, certificate, and import models are intentionally NOT part
+//   of Phase 2.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SYSTEM_ADMIN
+  BARANGAY_SECRETARY
+  BARANGAY_ENCODER
+  BARANGAY_CAPTAIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id                  String     @id @default(uuid()) @db.Char(36)
+  username            String     @unique @db.VarChar(64)
+  email               String     @unique @db.VarChar(191)
+  passwordHash        String     @db.VarChar(255)
+  firstName           String     @db.VarChar(80)
+  middleName          String?    @db.VarChar(80)
+  lastName            String     @db.VarChar(80)
+  role                UserRole
+  status              UserStatus @default(ACTIVE)
+  failedLoginAttempts Int        @default(0)
+  lockedUntil         DateTime?  @db.DateTime(3)
+  lastLoginAt         DateTime?  @db.DateTime(3)
+  passwordChangedAt   DateTime   @default(now()) @db.DateTime(3)
+  createdAt           DateTime   @default(now()) @db.DateTime(3)
+  updatedAt           DateTime   @updatedAt @db.DateTime(3)
+
+  actorEvents  AuditLog[] @relation("ActorAuditEvents")
+  targetEvents AuditLog[] @relation("TargetAuditEvents")
+
+  createdResidents        Resident[]                @relation("ResidentCreatedBy")
+  updatedResidents        Resident[]                @relation("ResidentUpdatedBy")
+  verifiedResidents       Resident[]                @relation("ResidentVerifiedBy")
+  residentChanges         ResidentChange[]
+  duplicateReviewsCreated ResidentDuplicateReview[] @relation("DuplicateReviewRequestedBy")
+  duplicateReviewsDecided ResidentDuplicateReview[] @relation("DuplicateReviewDecidedBy")
+  correctionsRequested    ResidentCorrection[]      @relation("CorrectionRequestedBy")
+  correctionsDecided      ResidentCorrection[]      @relation("CorrectionDecidedBy")
+
+  createdPuroks           Purok[]               @relation("PurokCreatedBy")
+  updatedPuroks           Purok[]               @relation("PurokUpdatedBy")
+  createdHouseholds       Household[]           @relation("HouseholdCreatedBy")
+  updatedHouseholds       Household[]           @relation("HouseholdUpdatedBy")
+  verifiedHouseholds      Household[]           @relation("HouseholdVerifiedBy")
+  createdHouseholdMembers HouseholdMembership[] @relation("HouseholdMembershipCreatedBy")
+  updatedHouseholdMembers HouseholdMembership[] @relation("HouseholdMembershipUpdatedBy")
+  householdChanges        HouseholdChange[]
+
+  @@index([role, status])
+  @@index([status])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Char(36)
+  sid       String   @unique @db.VarChar(191)
+  data      String   @db.Text
+  expiresAt DateTime @db.DateTime(3)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt @db.DateTime(3)
+
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Char(36)
+  actorUserId  String?  @db.Char(36)
+  targetUserId String?  @db.Char(36)
+  action       String   @db.VarChar(64)
+  entityType   String?  @db.VarChar(64)
+  entityId     String?  @db.VarChar(64)
+  ipAddress    String?  @db.VarChar(45)
+  userAgent    String?  @db.VarChar(255)
+  metadata     String?  @db.Text
+  createdAt    DateTime @default(now()) @db.DateTime(3)
+
+  actor  User? @relation("ActorAuditEvents", fields: [actorUserId], references: [id], onDelete: SetNull)
+  target User? @relation("TargetAuditEvents", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+enum Sex {
+  MALE
+  FEMALE
+  // Provisional legacy value. Barangay 2's official registration form still
+  // needs to confirm the final categories.
+  NOT_RECORDED
+}
+
+enum ResidencyStatus {
+  ACTIVE
+  MOVED_OUT
+  DECEASED
+  INACTIVE
+}
+
+enum RecordSource {
+  WALK_IN
+  FIELD_SURVEY
+  EXISTING_RECORD
+  IMPORT
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  VERIFIED
+}
+
+enum ResidentChangeAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  VERIFIED
+  DUPLICATE_REVIEW_REQUESTED
+  DUPLICATE_REVIEW_APPROVED
+  DUPLICATE_REVIEW_REJECTED
+  DUPLICATE_REVIEW_CANCELLED
+  CORRECTION_REQUESTED
+  CORRECTION_APPROVED
+  CORRECTION_REJECTED
+  CORRECTION_CANCELLED
+  STATUS_CORRECTED
+}
+
+enum DuplicateReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CorrectionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CorrectionType {
+  STATUS_REVERSAL
+}
+
+enum PurokStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum HouseholdStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum HouseholdMembershipStatus {
+  ACTIVE
+  ENDED
+}
+
+enum MembershipEndReason {
+  LEFT_HOUSEHOLD
+  MOVED_OUT
+  DECEASED
+  TRANSFERRED
+  HOUSEHOLD_DISSOLVED
+  OTHER
+}
+
+enum HouseholdChangeAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  VERIFIED
+  HEAD_CHANGED
+  MEMBER_ADDED
+  MEMBER_ENDED
+  MEMBER_TRANSFERRED
+  MEMBER_STATUS_CHANGED
+}
+
+model Resident {
+  id                               String             @id @default(uuid()) @db.Char(36)
+  residentNumber                   String             @unique @db.VarChar(20)
+  firstName                        String             @db.VarChar(80)
+  middleName                       String?            @db.VarChar(80)
+  lastName                         String             @db.VarChar(80)
+  suffix                           String?            @db.VarChar(20)
+  nameNormalized                   String             @db.VarChar(255)
+  nameKey                          String             @db.VarChar(255)
+  birthDate                        DateTime           @db.Date
+  sex                              Sex
+  contactNumber                    String?            @db.VarChar(20)
+  residencyStatus                  ResidencyStatus    @default(ACTIVE)
+  statusChangedAt                  DateTime           @default(now()) @db.DateTime(3)
+  recordSource                     RecordSource
+  sourceReference                  String?            @db.VarChar(150)
+  sourceReferenceUnavailableReason String?            @db.VarChar(500)
+  verificationStatus               VerificationStatus @default(UNVERIFIED)
+  verifiedAt                       DateTime?          @db.DateTime(3)
+  verifiedByUserId                 String?            @db.Char(36)
+  version                          Int                @default(1)
+  createdByUserId                  String?            @db.Char(36)
+  updatedByUserId                  String?            @db.Char(36)
+  createdAt                        DateTime           @default(now()) @db.DateTime(3)
+  updatedAt                        DateTime           @updatedAt @db.DateTime(3)
+
+  createdBy        User?                     @relation("ResidentCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy        User?                     @relation("ResidentUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  verifiedBy       User?                     @relation("ResidentVerifiedBy", fields: [verifiedByUserId], references: [id], onDelete: SetNull)
+  changes          ResidentChange[]
+  duplicateReviews ResidentDuplicateReview[] @relation("DuplicateReviewCreatedResident")
+  corrections      ResidentCorrection[]
+  headedHouseholds Household[]               @relation("HouseholdHead")
+  householdMembers HouseholdMembership[]
+
+  @@index([nameNormalized, birthDate])
+  @@index([nameKey, birthDate])
+  @@index([lastName, firstName, birthDate])
+  @@index([residencyStatus, lastName])
+  @@index([verificationStatus])
+  @@index([updatedAt])
+  @@map("residents")
+}
+
+model ResidentChange {
+  id          String               @id @default(uuid()) @db.Char(36)
+  residentId  String               @db.Char(36)
+  actorUserId String?              @db.Char(36)
+  action      ResidentChangeAction
+  changes     String?              @db.Text
+  reason      String?              @db.VarChar(500)
+  createdAt   DateTime             @default(now()) @db.DateTime(3)
+
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Restrict)
+  actor    User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([residentId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("resident_changes")
+}
+
+model ResidentNumberSequence {
+  year       Int      @id @db.Int
+  lastNumber Int      @default(0)
+  updatedAt  DateTime @updatedAt @db.DateTime(3)
+
+  @@map("resident_number_sequences")
+}
+
+model ResidentIdentityGuard {
+  identityKey String   @id @db.Char(64)
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+
+  @@map("resident_identity_guards")
+}
+
+model ResidentDuplicateReview {
+  id                   String                @id @default(uuid()) @db.Char(36)
+  status               DuplicateReviewStatus @default(PENDING)
+  identityKey          String                @db.Char(64)
+  activeIdentityKey    String?               @unique @db.Char(64)
+  requestedByUserId    String?               @db.Char(36)
+  decidedByUserId      String?               @db.Char(36)
+  draftData            String?               @db.Text
+  candidateResidentIds String?               @db.Text
+  reason               String                @db.VarChar(500)
+  decisionNote         String?               @db.VarChar(500)
+  createdResidentId    String?               @unique @db.Char(36)
+  version              Int                   @default(1)
+  createdAt            DateTime              @default(now()) @db.DateTime(3)
+  updatedAt            DateTime              @updatedAt @db.DateTime(3)
+  decidedAt            DateTime?             @db.DateTime(3)
+
+  requestedBy     User?     @relation("DuplicateReviewRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  decidedBy       User?     @relation("DuplicateReviewDecidedBy", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+  createdResident Resident? @relation("DuplicateReviewCreatedResident", fields: [createdResidentId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([identityKey, status])
+  @@index([requestedByUserId, createdAt])
+  @@map("resident_duplicate_reviews")
+}
+
+model ResidentCorrection {
+  id                String           @id @default(uuid()) @db.Char(36)
+  residentId        String           @db.Char(36)
+  status            CorrectionStatus @default(PENDING)
+  correctionType    CorrectionType   @default(STATUS_REVERSAL)
+  fromStatus        ResidencyStatus
+  toStatus          ResidencyStatus
+  reason            String           @db.VarChar(500)
+  evidenceReference String           @db.VarChar(255)
+  requestedByUserId String?          @db.Char(36)
+  decidedByUserId   String?          @db.Char(36)
+  decisionNote      String?          @db.VarChar(500)
+  activeResidentId  String?          @unique @db.Char(36)
+  version           Int              @default(1)
+  createdAt         DateTime         @default(now()) @db.DateTime(3)
+  updatedAt         DateTime         @updatedAt @db.DateTime(3)
+  decidedAt         DateTime?        @db.DateTime(3)
+
+  resident    Resident @relation(fields: [residentId], references: [id], onDelete: Restrict)
+  requestedBy User?    @relation("CorrectionRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  decidedBy   User?    @relation("CorrectionDecidedBy", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([residentId, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@map("resident_corrections")
+}
+
+model Purok {
+  id             String      @id @default(uuid()) @db.Char(36)
+  code           String      @unique @db.VarChar(20)
+  name           String      @db.VarChar(120)
+  nameNormalized String      @unique @db.VarChar(160)
+  status         PurokStatus @default(ACTIVE)
+  version        Int         @default(1)
+
+  createdByUserId String?  @db.Char(36)
+  updatedByUserId String?  @db.Char(36)
+  createdAt       DateTime @default(now()) @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @db.DateTime(3)
+
+  createdBy User? @relation("PurokCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy User? @relation("PurokUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  households Household[]
+
+  @@index([status, name])
+  @@index([updatedAt])
+  @@map("puroks")
+}
+
+model Household {
+  id                 String             @id @default(uuid()) @db.Char(36)
+  householdNumber    String             @unique @db.VarChar(20)
+  purokId            String             @db.Char(36)
+  addressLine        String             @db.VarChar(255)
+  landmark           String?            @db.VarChar(200)
+  headResidentId     String?            @unique @db.Char(36)
+  status             HouseholdStatus    @default(ACTIVE)
+  statusChangedAt    DateTime           @default(now()) @db.DateTime(3)
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  verifiedAt         DateTime?          @db.DateTime(3)
+  verifiedByUserId   String?            @db.Char(36)
+  version            Int                @default(1)
+  createdByUserId    String?            @db.Char(36)
+  updatedByUserId    String?            @db.Char(36)
+  createdAt          DateTime           @default(now()) @db.DateTime(3)
+  updatedAt          DateTime           @updatedAt @db.DateTime(3)
+
+  purok        Purok     @relation(fields: [purokId], references: [id], onDelete: Restrict)
+  headResident Resident? @relation("HouseholdHead", fields: [headResidentId], references: [id], onDelete: Restrict)
+  createdBy    User?     @relation("HouseholdCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy    User?     @relation("HouseholdUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  verifiedBy   User?     @relation("HouseholdVerifiedBy", fields: [verifiedByUserId], references: [id], onDelete: SetNull)
+
+  memberships HouseholdMembership[]
+  changes     HouseholdChange[]
+
+  @@index([purokId, status])
+  @@index([status, householdNumber])
+  @@index([verificationStatus])
+  @@index([updatedAt])
+  @@map("households")
+}
+
+model HouseholdMembership {
+  id               String                    @id @default(uuid()) @db.Char(36)
+  householdId      String                    @db.Char(36)
+  residentId       String                    @db.Char(36)
+  activeResidentId String?                   @unique @db.Char(36)
+  relationship     String?                   @db.VarChar(80)
+  status           HouseholdMembershipStatus @default(ACTIVE)
+  joinedAt         DateTime                  @default(now()) @db.DateTime(3)
+  endedAt          DateTime?                 @db.DateTime(3)
+  endReason        MembershipEndReason?
+  endNote          String?                   @db.VarChar(500)
+  version          Int                       @default(1)
+  createdByUserId  String?                   @db.Char(36)
+  updatedByUserId  String?                   @db.Char(36)
+  createdAt        DateTime                  @default(now()) @db.DateTime(3)
+  updatedAt        DateTime                  @updatedAt @db.DateTime(3)
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  resident  Resident  @relation(fields: [residentId], references: [id], onDelete: Restrict)
+  createdBy User?     @relation("HouseholdMembershipCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy User?     @relation("HouseholdMembershipUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([householdId, status, createdAt])
+  @@index([residentId, status])
+  @@index([status, endedAt])
+  @@map("household_memberships")
+}
+
+model HouseholdChange {
+  id          String                @id @default(uuid()) @db.Char(36)
+  householdId String                @db.Char(36)
+  actorUserId String?               @db.Char(36)
+  action      HouseholdChangeAction
+  changes     String?               @db.Text
+  reason      String?               @db.VarChar(500)
+  createdAt   DateTime              @default(now()) @db.DateTime(3)
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  actor     User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([householdId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("household_changes")
+}
+
+model HouseholdNumberSequence {
+  year       Int      @id @db.Int
+  lastNumber Int      @default(0)
+  updatedAt  DateTime @updatedAt @db.DateTime(3)
+
+  @@map("household_number_sequences")
+}
